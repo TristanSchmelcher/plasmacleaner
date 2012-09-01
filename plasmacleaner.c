@@ -1,4 +1,4 @@
-// Displays a moving white bar to remove image retention from plasma monitors or
+// Displays a moving bar to remove image retention from plasma monitors or
 // HDTVs.
 //
 // Copyright (c) 2012 Tristan Schmelcher <tristan_schmelcher@alumni.uwaterloo.ca>
@@ -23,35 +23,38 @@
 #include <gtk/gtk.h>
 #include <X11/X.h>
 
-// Number of milliseconds for the white bar to move across the screen.
+// Number of milliseconds for the bar to move across the screen (approximate).
 static const guint PERIOD_MS = 4000;
-// White bar's width as a fraction of the screen width.
+// Bar's width as a fraction of the screen width.
 static const double BAR_FRACTION = 3.0/8;
 // How often to simulate mouse movement to suppress screensaver.
 static const guint SCREENSAVER_SUPPRESSION_PERIOD_MS = 1000;
+
+// Colour of the bar (slightly blue tint).
+static const double BAR_COLOUR_R = 0.9;
+static const double BAR_COLOUR_G = 0.9;
+static const double BAR_COLOUR_B = 1.0;
 
 struct data_t {
   GtkWidget *window;
   cairo_pattern_t *pattern;
   guint draw_timeout_id;
+  guint draw_timeout_interval;
   guint x;
-  guint last_width;
+  int width;
 };
 
-static void free_draw_timeout_and_pattern(struct data_t *data) {
+static void free_draw_timeout(struct data_t *data) {
   if (data->draw_timeout_id) {
     g_source_remove(data->draw_timeout_id);
     data->draw_timeout_id = 0;
-  }
-  if (data->pattern) {
-    cairo_pattern_destroy(data->pattern);
-    data->pattern = NULL;
   }
 }
 
 static gboolean on_draw_timer(gpointer user_data) {
   struct data_t *data = (struct data_t *)user_data;
-  data->x++;
+  assert(data->width);
+  data->x = (data->x + 1) % data->width;
   gtk_widget_queue_draw(data->window);
   return TRUE;
 }
@@ -59,26 +62,29 @@ static gboolean on_draw_timer(gpointer user_data) {
 static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
   struct data_t *data = (struct data_t *)user_data;
 
-  gint width = gtk_widget_get_allocated_width(widget);
-  if (data->last_width != width) {
-    free_draw_timeout_and_pattern(data);
+  int width = gtk_widget_get_allocated_width(widget);
+  assert(width);
 
-    data->draw_timeout_id = g_timeout_add(PERIOD_MS / (double)width,
-        &on_draw_timer, data);
-
-    cairo_pattern_t *pattern = cairo_pattern_create_linear(0, 0, width, 0);
-    cairo_pattern_add_color_stop_rgb(pattern, 0.0, 1.0, 1.0, 1.0);
-    cairo_pattern_add_color_stop_rgb(pattern, BAR_FRACTION, 1.0, 1.0, 1.0);
-    cairo_pattern_add_color_stop_rgb(pattern, BAR_FRACTION, 0.0, 0.0, 0.0);
-    cairo_pattern_add_color_stop_rgb(pattern, 1.0, 0.0, 0.0, 0.0);
-    cairo_pattern_set_extend(pattern, CAIRO_EXTEND_REPEAT);
-    data->pattern = pattern;
+  // (Re-)register draw timeout if interval has changed.
+  guint draw_timeout_interval = PERIOD_MS / width;
+  if (data->draw_timeout_interval != draw_timeout_interval) {
+    free_draw_timeout(data);
+    data->draw_timeout_id = g_timeout_add(draw_timeout_interval, &on_draw_timer,
+        data);
+    data->draw_timeout_interval = draw_timeout_interval;
   }
-  data->last_width = width;
 
-  data->x %= width;
+  // Scale x if width changed.
+  if (data->width != width) {
+    if (data->width) {
+      data->x = data->x * width / data->width;
+    }
+    data->width = width;
+  }
 
+  // Draw.
   cairo_translate(cr, data->x, 0.0);
+  cairo_scale(cr, width, 1.0);
   cairo_set_source(cr, data->pattern);
   cairo_paint(cr);
 
@@ -93,7 +99,7 @@ static gboolean on_button_or_key_press(GtkWidget *widget, GdkEvent *event,
 
 static void on_destroy(GtkWidget *widget, gpointer user_data) {
   struct data_t *data = (struct data_t *)user_data;
-  free_draw_timeout_and_pattern(data);
+  free_draw_timeout(data);
   gtk_main_quit();
 }
 
@@ -111,6 +117,7 @@ int main(int argc, char **argv) {
   gtk_init(&argc, &argv);
 
   struct data_t data = {0};
+
   data.window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
   assert(data.window);
   gtk_window_set_title(GTK_WINDOW(data.window), "Plasma Cleaner");
@@ -130,6 +137,16 @@ int main(int argc, char **argv) {
   gdk_window_set_cursor(gtk_widget_get_window(data.window), cursor);
   g_object_unref(cursor);
   gtk_window_present(GTK_WINDOW(data.window));
+
+  data.pattern = cairo_pattern_create_linear(0.0, 0.0, 1.0, 0.0);
+  cairo_pattern_add_color_stop_rgb(data.pattern, 0.0, BAR_COLOUR_R,
+      BAR_COLOUR_G, BAR_COLOUR_B);
+  cairo_pattern_add_color_stop_rgb(data.pattern, BAR_FRACTION, BAR_COLOUR_R,
+      BAR_COLOUR_G, BAR_COLOUR_B);
+  cairo_pattern_add_color_stop_rgb(data.pattern, BAR_FRACTION, 0.0, 0.0, 0.0);
+  cairo_pattern_add_color_stop_rgb(data.pattern, 1.0, 0.0, 0.0, 0.0);
+  cairo_pattern_set_extend(data.pattern, CAIRO_EXTEND_REPEAT);
+
   guint screensaver_suppression_timeout_id = g_timeout_add(
       SCREENSAVER_SUPPRESSION_PERIOD_MS, &on_screensaver_suppression_timer,
       NULL);
@@ -137,5 +154,8 @@ int main(int argc, char **argv) {
   gtk_main();
 
   g_source_remove(screensaver_suppression_timeout_id);
+
+  cairo_pattern_destroy(data.pattern);
+
   return 0;
 }
